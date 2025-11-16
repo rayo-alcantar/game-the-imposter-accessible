@@ -10,6 +10,13 @@ import type {
 } from "@/domain/gameTypes";
 import { getSocket } from "@/lib/socketClient";
 import { WORD_CATEGORY_SUMMARY } from "@/domain/wordList";
+import {
+  clearLastSession,
+  loadLastSession,
+  loadRememberedName,
+  rememberPlayerName,
+  saveLastSession,
+} from "@/lib/playerSession";
 
 const PHASE_LABELS: Record<GamePhase, string> = {
   LOBBY: "En sala de espera",
@@ -87,6 +94,18 @@ export default function GamePage() {
         setGuess("");
         setGuessStatus("");
       }
+
+      const existingSession = loadLastSession();
+      const passwordToKeep =
+        existingSession && existingSession.gameId === state.gameId
+          ? existingSession.password
+          : undefined;
+      saveLastSession({
+        gameId: state.gameId,
+        playerName: state.self.name,
+        password: passwordToKeep,
+        playerId: socket.id,
+      });
     };
 
     const setStatus = (message: string) => {
@@ -110,6 +129,11 @@ export default function GamePage() {
       setErrorMessage(message);
       setStatus(message);
     });
+    socket.on("connect_error", () => {
+      setErrorMessage("No pudimos conectar con el servidor. Reintenta en unos segundos.");
+    });
+    socket.on("disconnect", () => {
+    });
 
     if (gameIdParam) {
       socket.emit("requestState", { gameId: gameIdParam });
@@ -122,16 +146,60 @@ export default function GamePage() {
       socket.off("votingStarted");
       socket.off("resultAnnounced");
       socket.off("error");
+      socket.off("connect_error");
+      socket.off("disconnect");
     };
   }, [gameIdParam]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const storedName = window.localStorage.getItem("impostor:lastName");
-    if (storedName) {
-      setJoinName(storedName);
+    if (typeof window === "undefined" || !gameIdParam) return;
+    const socket = getSocket();
+
+    const attemptAutoRejoin = () => {
+      const session = loadLastSession();
+      if (!session || session.gameId !== gameIdParam) return;
+      if (session.playerId && session.playerId === socket.id && socket.connected) {
+        return;
+      }
+      socket.emit(
+        "joinGame",
+        {
+          gameId: session.gameId,
+          playerName: session.playerName,
+          password: session.password,
+        },
+        (response) => {
+          if (!response?.ok) {
+            setJoinError(
+              response?.error ?? "No pudimos reconectarte automaticamente.",
+            );
+            return;
+          }
+          setJoinError("");
+          saveLastSession({ ...session, playerId: socket.id });
+          socket.emit("requestState", { gameId: session.gameId });
+        },
+      );
+    };
+
+    socket.on("connect", attemptAutoRejoin);
+    attemptAutoRejoin();
+
+    return () => {
+      socket.off("connect", attemptAutoRejoin);
+    };
+  }, [game?.self?.id, gameIdParam, joinLoading]);
+
+  useEffect(() => {
+    const storedName = loadRememberedName();
+    if (storedName) setJoinName(storedName);
+
+    const session = loadLastSession();
+    if (session && session.gameId === gameIdParam) {
+      setJoinName(session.playerName);
+      setJoinPassword(session.password ?? "");
     }
-  }, []);
+  }, [gameIdParam]);
 
   useEffect(() => {
     const nextCategory = game?.wordCategoryId ?? "any";
@@ -139,6 +207,22 @@ export default function GamePage() {
   }, [game?.wordCategoryId]);
 
   const gameId = game?.gameId ?? gameIdParam ?? "";
+
+  useEffect(() => {
+    if (!gameId || typeof window === "undefined") return;
+    const socket = getSocket();
+
+    const sendHeartbeat = () => {
+      if (!socket.connected) {
+        socket.connect();
+      }
+      socket.emit("heartbeat", { gameId });
+    };
+
+    sendHeartbeat();
+    const interval = window.setInterval(sendHeartbeat, 60_000);
+    return () => window.clearInterval(interval);
+  }, [gameId]);
 
   const shareLink = useMemo(() => {
     if (typeof window === "undefined" || !gameId) return "";
@@ -268,6 +352,10 @@ export default function GamePage() {
     setJoinLoading(true);
     const socket = getSocket();
     const trimmedName = joinName.trim();
+    const timeout = window.setTimeout(() => {
+      setJoinLoading(false);
+      setJoinError("No pudimos conectar con la sala. Inténtalo de nuevo.");
+    }, 12_000);
     socket.emit(
       "joinGame",
       {
@@ -276,20 +364,26 @@ export default function GamePage() {
         password: joinPassword.trim() || undefined,
       },
       (response) => {
+        window.clearTimeout(timeout);
         setJoinLoading(false);
         if (!response?.ok) {
           setJoinError(response?.error ?? "No pudimos unirte a la partida.");
           return;
         }
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem("impostor:lastName", trimmedName);
-        }
+        rememberPlayerName(trimmedName);
+        saveLastSession({
+          gameId,
+          playerName: trimmedName,
+          password: joinPassword.trim() || undefined,
+          playerId: socket.id,
+        });
       },
     );
   };
 
   const handleLeave = () => {
     if (!gameId) return router.push("/");
+    clearLastSession();
     getSocket().emit("leaveGame", { gameId });
     router.push("/");
   };

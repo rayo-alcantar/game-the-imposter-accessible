@@ -36,6 +36,7 @@ export interface ClientToServerEvents {
   reshuffleGame: (payload: { gameId: string }, ack?: AckResponse) => void;
   leaveGame: (payload: { gameId: string }) => void;
   requestState: (payload: { gameId: string }) => void;
+  heartbeat: (payload: { gameId?: string }, ack?: AckResponse) => void;
 }
 
 export interface ServerToClientEvents {

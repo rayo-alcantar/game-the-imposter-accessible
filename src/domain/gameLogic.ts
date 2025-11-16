@@ -113,8 +113,19 @@ const assignRolesAndWords = (game: GameState): void => {
   game.impostorWord = pair.impostor;
 };
 
+const shufflePlayers = (game: GameState): void => {
+  for (let index = game.players.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [game.players[index], game.players[swapIndex]] = [
+      game.players[swapIndex],
+      game.players[index],
+    ];
+  }
+};
+
 const prepareNewMatch = (game: GameState): DomainEvent[] => {
   assignRolesAndWords(game);
+  shufflePlayers(game);
   game.phase = "ROUNDS";
   game.currentRound = 1;
   game.currentTurnIndex = 0;
@@ -294,6 +305,7 @@ export const markPlayerTurnDone = (
       events.push({ type: "VOTING_STARTED" });
     } else {
       game.currentRound += 1;
+      shufflePlayers(game);
       game.currentTurnIndex = 0;
       events.push({ type: "ROUND_STARTED", round: game.currentRound });
       const nextPlayer = game.players[game.currentTurnIndex];

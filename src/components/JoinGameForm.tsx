@@ -1,13 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { getSocket } from "../lib/socketClient";
-
-const rememberPlayerName = (name: string) => {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem("impostor:lastName", name);
-};
+import { rememberPlayerName, saveLastSession } from "../lib/playerSession";
 
 const parseGameId = (raw: string): string => {
   const trimmed = raw.trim();
@@ -24,6 +20,23 @@ export function JoinGameForm() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    const socket = getSocket();
+    const handleConnectError = () => {
+      setLoading(false);
+      setError("No pudimos conectar con el servidor. Reintenta en unos segundos.");
+    };
+    const handleDisconnect = () => {
+      setLoading(false);
+    };
+    socket.on("connect_error", handleConnectError);
+    socket.on("disconnect", handleDisconnect);
+    return () => {
+      socket.off("connect_error", handleConnectError);
+      socket.off("disconnect", handleDisconnect);
+    };
+  }, []);
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError("");
@@ -39,6 +52,10 @@ export function JoinGameForm() {
     const socket = getSocket();
     setLoading(true);
     const trimmedName = playerName.trim();
+    const timeout = window.setTimeout(() => {
+      setLoading(false);
+      setError("No pudimos conectar con la sala. Intenta de nuevo.");
+    }, 12_000);
     socket.emit(
       "joinGame",
       {
@@ -47,12 +64,19 @@ export function JoinGameForm() {
         password: password.trim() || undefined,
       },
       (response) => {
+        window.clearTimeout(timeout);
         setLoading(false);
         if (!response?.ok || !response.gameId) {
           setError(response?.error ?? "No fue posible unirse.");
           return;
         }
         rememberPlayerName(trimmedName);
+        saveLastSession({
+          gameId: response.gameId,
+          playerName: trimmedName,
+          password: password.trim() || undefined,
+          playerId: socket.id,
+        });
         router.push(`/game/${response.gameId}`);
       },
     );

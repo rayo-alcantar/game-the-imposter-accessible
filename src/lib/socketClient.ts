@@ -19,7 +19,8 @@ export const getSocket = (): Socket<
       reconnectionAttempts: 10,
       reconnectionDelay: 500,
       reconnectionDelayMax: 5000,
-      transports: ["websocket"],
+      transports: ["websocket", "polling"],
+      timeout: 10_000,
     });
   }
   if (!socket.connected) {

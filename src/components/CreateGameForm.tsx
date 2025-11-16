@@ -4,11 +4,7 @@ import { useMemo, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { WORD_CATEGORY_SUMMARY } from "@/domain/wordList";
 import { getSocket } from "../lib/socketClient";
-
-const rememberPlayerName = (name: string) => {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem("impostor:lastName", name);
-};
+import { rememberPlayerName, saveLastSession } from "../lib/playerSession";
 
 export function CreateGameForm() {
   const router = useRouter();
@@ -60,6 +56,12 @@ export function CreateGameForm() {
           return;
         }
         rememberPlayerName(trimmedName);
+        saveLastSession({
+          gameId: response.gameId,
+          playerName: trimmedName,
+          password: password.trim() || undefined,
+          playerId: socket.id,
+        });
         router.push(`/game/${response.gameId}`);
       },
     );

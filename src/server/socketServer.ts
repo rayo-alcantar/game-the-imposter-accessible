@@ -11,7 +11,7 @@ import {
   leaveGame,
   reshuffleRolesAndWords,
 } from "../domain/gameLogic";
-import { getGame } from "../domain/gameStore";
+import { getGame, updateGame } from "../domain/gameStore";
 import { DomainEvent, GameError } from "../domain/gameTypes";
 import { serializeGameStateForPlayer } from "./serializers";
 import {
@@ -107,6 +107,17 @@ const ensureSocketInGame = (socket: GameSocket, gameId?: string): string => {
   return activeGameId;
 };
 
+const recordHeartbeat = (socket: GameSocket, gameId?: string): void => {
+  const targetGameId = gameId ?? socket.data.gameId;
+  if (!targetGameId) return;
+  const game = getGame(targetGameId);
+  if (!game) return;
+  const player = game.players.find((current) => current.id === socket.id);
+  if (!player) return;
+  player.connected = true;
+  updateGame(game);
+};
+
 const handleLeave = (socket: GameSocket, specifiedGameId?: string) => {
   const gameId = specifiedGameId ?? socket.data.gameId;
   if (!gameId) return;
@@ -181,6 +192,16 @@ export const initSocket = (server: HTTPServer) => {
         emitGameState(gameId);
       } catch (error) {
         sendError(socket, error);
+      }
+    });
+
+    socket.on("heartbeat", (payload, ack) => {
+      try {
+        const gameId = payload?.gameId ?? socket.data.gameId;
+        recordHeartbeat(socket, gameId);
+        ack?.({ ok: true, gameId });
+      } catch (error) {
+        sendError(socket, error, ack);
       }
     });
 
