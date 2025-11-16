@@ -1,0 +1,472 @@
+"use client";
+
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import type { GamePhase, SerializedGameState } from "@/domain/gameTypes";
+import { getSocket } from "@/lib/socketClient";
+
+const PHASE_LABELS: Record<GamePhase, string> = {
+  LOBBY: "En sala de espera",
+  ASSIGNING: "Asignando roles",
+  ROUNDS: "Rondas en progreso",
+  VOTING: "Votación abierta",
+  RESULTS: "Resultados",
+  FINISHED: "Partida finalizada",
+};
+
+const phaseDescription = (game: SerializedGameState | null) => {
+  if (!game) return "Conéctate para recibir actualizaciones.";
+  switch (game.phase) {
+    case "ROUNDS":
+      return `Ronda ${game.currentRound} de ${game.totalRounds}`;
+    case "VOTING":
+      return "Momento de votar al impostor.";
+    case "RESULTS":
+      return "Resultados listos.";
+    case "LOBBY":
+      return `Esperando a ${game.maxPlayers - game.playerCount} jugador(es).`;
+    default:
+      return PHASE_LABELS[game.phase];
+  }
+};
+
+export default function GamePage() {
+  const params = useParams();
+  const router = useRouter();
+  const gameIdParam = Array.isArray(params?.gameId)
+    ? params?.gameId[0]
+    : (params?.gameId as string | undefined);
+  const [game, setGame] = useState<SerializedGameState | null>(null);
+  const [selectedVote, setSelectedVote] = useState("");
+  const [guess, setGuess] = useState("");
+  const [liveMessage, setLiveMessage] = useState(
+    "Esperando actualizaciones de la partida...",
+  );
+  const [errorMessage, setErrorMessage] = useState("");
+  const [joinName, setJoinName] = useState("");
+  const [joinPassword, setJoinPassword] = useState("");
+  const [joinLoading, setJoinLoading] = useState(false);
+  const [joinError, setJoinError] = useState("");
+
+  useEffect(() => {
+    const socket = getSocket();
+
+    const handleGameUpdated = (state: SerializedGameState) => {
+      if (!gameIdParam || state.gameId !== gameIdParam) return;
+      setGame(state);
+      setErrorMessage("");
+      setJoinError("");
+      setJoinLoading(false);
+      if (state.phase !== "VOTING") {
+        setSelectedVote("");
+      } else if (state.self.vote) {
+        setSelectedVote(state.self.vote);
+      }
+      if (state.self.role === "IMPOSTOR" && state.impostorGuess) {
+        setGuess(state.impostorGuess);
+      } else if (state.self.role !== "IMPOSTOR") {
+        setGuess("");
+      }
+    };
+
+    const setStatus = (message: string) => {
+      setLiveMessage(message);
+    };
+
+    socket.on("gameUpdated", handleGameUpdated);
+    socket.on("roundStarted", ({ round }) =>
+      setStatus(`Comienza la ronda ${round}.`),
+    );
+    socket.on("nextPlayerTurn", ({ playerName }) =>
+      setStatus(`Turno de ${playerName}.`),
+    );
+    socket.on("votingStarted", () =>
+      setStatus("Comienza la votación, comparte tu sospecha."),
+    );
+    socket.on("resultAnnounced", ({ winner, impostorGuessCorrect }) => {
+      const base =
+        winner === "CIVILS"
+          ? "Las personas civiles ganan."
+          : winner === "IMPOSTOR"
+            ? "El impostor se salió con la suya."
+            : "Empate.";
+      const detail = impostorGuessCorrect
+        ? " El impostor adivinó la palabra."
+        : "";
+      setStatus(`${base}${detail}`);
+    });
+    socket.on("error", ({ message }) => {
+      setErrorMessage(message);
+      setStatus(message);
+    });
+
+    if (gameIdParam) {
+      socket.emit("requestState", { gameId: gameIdParam });
+    }
+
+    return () => {
+      socket.off("gameUpdated", handleGameUpdated);
+      socket.off("roundStarted");
+      socket.off("nextPlayerTurn");
+      socket.off("votingStarted");
+      socket.off("resultAnnounced");
+      socket.off("error");
+    };
+  }, [gameIdParam]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storedName = window.localStorage.getItem("impostor:lastName");
+    if (storedName) {
+      setJoinName(storedName);
+    }
+  }, []);
+
+  const gameId = game?.gameId ?? gameIdParam ?? "";
+
+  const shareLink = useMemo(() => {
+    if (typeof window === "undefined" || !gameId) return "";
+    return `${window.location.origin}/game/${gameId}`;
+  }, [gameId]);
+
+  const handleStart = () => {
+    if (!gameId) return;
+    getSocket().emit("startGame", { gameId });
+  };
+
+  const handleReady = () => {
+    if (!gameId) return;
+    getSocket().emit("playerReadyForRound", { gameId });
+  };
+
+  const handleVoteSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!gameId || !selectedVote) return;
+    getSocket().emit("castVote", { gameId, votedPlayerId: selectedVote });
+  };
+
+  const handleGuessSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!gameId || !guess.trim()) return;
+    getSocket().emit("impostorGuess", { gameId, guess: guess.trim() });
+  };
+
+  const handleRestart = () => {
+    if (!gameId) return;
+    getSocket().emit("requestRestart", { gameId });
+  };
+
+  const handleInlineJoin = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!gameId) {
+      setJoinError("El enlace no es válido.");
+      return;
+    }
+    if (!joinName.trim()) {
+      setJoinError("Necesitas escribir tu nombre.");
+      return;
+    }
+    setJoinError("");
+    setJoinLoading(true);
+    const socket = getSocket();
+    const trimmedName = joinName.trim();
+    socket.emit(
+      "joinGame",
+      {
+        gameId,
+        playerName: trimmedName,
+        password: joinPassword.trim() || undefined,
+      },
+      (response) => {
+        setJoinLoading(false);
+        if (!response?.ok) {
+          setJoinError(response?.error ?? "No pudimos unirte a la partida.");
+          return;
+        }
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem("impostor:lastName", trimmedName);
+        }
+      },
+    );
+  };
+
+  const handleLeave = () => {
+    if (!gameId) return router.push("/");
+    getSocket().emit("leaveGame", { gameId });
+    router.push("/");
+  };
+
+  const handleCopyLink = async () => {
+    if (!shareLink) return;
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      setLiveMessage("Enlace copiado al portapapeles.");
+    } catch {
+      setErrorMessage("No pudimos copiar el enlace automáticamente.");
+    }
+  };
+
+  const currentTurnId =
+    game?.phase === "ROUNDS" ? game.currentTurnPlayerId : undefined;
+
+  const showReadyButton =
+    game?.phase === "ROUNDS" && currentTurnId === game?.self.id;
+
+  const showVotingForm = game?.phase === "VOTING";
+  const showRestart = game?.phase === "RESULTS" && game.self.isHost;
+
+  const resultMessage =
+    game?.phase === "RESULTS"
+      ? game.winner === "CIVILS"
+        ? "¡Las personas civiles atraparon al impostor!"
+        : game.winner === "IMPOSTOR"
+          ? "El impostor no fue descubierto."
+          : "Empate: atraparon al impostor, pero adivinó la palabra."
+      : "";
+
+  return (
+    <main
+      style={{
+        padding: "2rem",
+        display: "flex",
+        flexDirection: "column",
+        gap: "1.5rem",
+        maxWidth: "1000px",
+        margin: "0 auto",
+      }}
+      aria-live="polite"
+    >
+      <header className="panel">
+        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+          <div>
+            <p
+              style={{
+                margin: 0,
+                fontSize: "0.85rem",
+                letterSpacing: "0.15em",
+                textTransform: "uppercase",
+              }}
+            >
+              Código
+            </p>
+            <p
+              style={{
+                fontSize: "1.8rem",
+                margin: 0,
+                fontWeight: 700,
+                letterSpacing: "0.2em",
+              }}
+            >
+              {gameId || "????"}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={handleCopyLink}
+            disabled={!shareLink}
+          >
+            Copiar enlace
+          </button>
+          <button type="button" className="secondary-button" onClick={handleLeave}>
+            Salir de la partida
+          </button>
+        </div>
+        <p role="status" aria-live="polite">
+          {phaseDescription(game)}
+        </p>
+        <p
+          aria-live="polite"
+          style={{ margin: "0.5rem 0", fontWeight: 600 }}
+        >
+          {liveMessage}
+        </p>
+        {errorMessage ? (
+          <p role="alert" aria-live="assertive">
+            {errorMessage}
+          </p>
+        ) : null}
+      </header>
+
+      {game ? (
+        <>
+          <section className="panel" aria-label="Tu información secreta">
+            <h2>Tu rol</h2>
+            <p>
+              <strong>{game.self.role ?? "Sin asignar"}</strong>
+            </p>
+            {game.self.word ? (
+              <p>
+                Tu palabra es:{" "}
+                <strong aria-label="Tu palabra secreta">{game.self.word}</strong>
+              </p>
+            ) : (
+              <p>Aún no tienes palabra asignada.</p>
+            )}
+            {showReadyButton ? (
+              <button type="button" className="primary-button" onClick={handleReady}>
+                Ya dije mi palabra
+              </button>
+            ) : null}
+            {game.self.isHost && game.phase === "LOBBY" ? (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={handleStart}
+                disabled={game.playerCount !== game.maxPlayers}
+                aria-disabled={game.playerCount !== game.maxPlayers}
+              >
+                Iniciar partida
+              </button>
+            ) : null}
+            {showRestart ? (
+              <button type="button" className="primary-button" onClick={handleRestart}>
+                Reiniciar partida
+              </button>
+            ) : null}
+          </section>
+
+          <section className="panel" aria-label="Personas conectadas">
+            <h2>Jugadores conectados</h2>
+            <ul className="list-unstyled">
+              {game.players.map((player) => (
+                <li
+                  key={player.id}
+                  style={{
+                    padding: "0.5rem 0",
+                    borderBottom: "1px solid rgba(255,255,255,0.1)",
+                  }}
+                >
+                  <span>{player.name}</span>{" "}
+                  {player.isHost ? <span>(Host)</span> : null}{" "}
+                  {currentTurnId === player.id && game.phase === "ROUNDS" ? (
+                    <strong> - Turno actual</strong>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          {showVotingForm ? (
+            <section className="panel" aria-label="Votación">
+              <h2>Vota quién crees que es el impostor</h2>
+              <form onSubmit={handleVoteSubmit}>
+                <fieldset>
+                  <legend>Selecciona un jugador</legend>
+                  {game.players.map((player) => (
+                    <label key={player.id} style={{ display: "block", margin: "0.5rem 0" }}>
+                      <input
+                        type="radio"
+                        name="vote"
+                        value={player.id}
+                        checked={selectedVote === player.id}
+                        onChange={(event) => setSelectedVote(event.target.value)}
+                      />{" "}
+                      {player.name}
+                    </label>
+                  ))}
+                </fieldset>
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={!selectedVote}
+                >
+                  Enviar voto
+                </button>
+              </form>
+            </section>
+          ) : null}
+
+          {showVotingForm && game.self.role === "IMPOSTOR" ? (
+            <section className="panel" aria-label="Adivinanza del impostor">
+              <h2>¿Cuál crees que es la palabra de los civiles?</h2>
+              <form onSubmit={handleGuessSubmit}>
+                <div className="field">
+                  <label htmlFor="guessInput">Tu conjetura</label>
+                  <input
+                    id="guessInput"
+                    type="text"
+                    value={guess}
+                    onChange={(event) => setGuess(event.target.value)}
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="secondary-button"
+                  disabled={!guess.trim()}
+                >
+                  Enviar conjetura
+                </button>
+              </form>
+            </section>
+          ) : null}
+
+          {game.phase === "RESULTS" ? (
+            <section className="panel" aria-label="Resultados de la partida">
+              <h2>Resultados</h2>
+              <p>{resultMessage}</p>
+              {game.impostorGuess ? (
+                <p>
+                  El impostor escribió: <strong>{game.impostorGuess}</strong>
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+        </>
+      ) : (
+        <section className="panel">
+          <h2>Únete a esta partida</h2>
+          <p>
+            Si abriste el enlace directamente, ingresa tu nombre para enlazarte
+            con la sala. Si tiene contraseña, escríbela también.
+          </p>
+          <form onSubmit={handleInlineJoin}>
+            <div className="field">
+              <label htmlFor="inlineName">Tu nombre</label>
+              <input
+                id="inlineName"
+                type="text"
+                value={joinName}
+                maxLength={32}
+                onChange={(event) => setJoinName(event.target.value)}
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="inlinePassword">Contraseña (si aplica)</label>
+              <input
+                id="inlinePassword"
+                type="password"
+                value={joinPassword}
+                maxLength={32}
+                onChange={(event) => setJoinPassword(event.target.value)}
+              />
+            </div>
+            {joinError ? (
+              <p role="alert" aria-live="assertive">
+                {joinError}
+              </p>
+            ) : null}
+            <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={joinLoading}
+                aria-busy={joinLoading}
+              >
+                {joinLoading ? "Conectando..." : "Unirme ahora"}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => router.push("/")}
+              >
+                Volver al inicio
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
+    </main>
+  );
+}
