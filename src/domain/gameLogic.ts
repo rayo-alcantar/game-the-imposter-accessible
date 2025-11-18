@@ -69,6 +69,9 @@ const ensureStatsForPlayer = (game: GameState, player: Player): PlayerStats => {
 
 const DEFAULT_CATEGORY_NAME = "Aleatorio (todas)";
 
+const getConnectedPlayers = (game: GameState): Player[] =>
+  game.players.filter((player) => player.connected);
+
 const swapPlayerId = (game: GameState, oldId: string, newId: string): void => {
   if (oldId === newId) return;
   const newVotes: VoteMap = {};
@@ -105,8 +108,9 @@ const resolveCategorySelection = (
 
 const assignRolesAndWords = (game: GameState): void => {
   const pair = getRandomWordPair(game.wordCategoryId);
-  const impostorIndex = Math.floor(Math.random() * game.players.length);
-  game.players.forEach((player, index) => {
+  const connectedPlayers = getConnectedPlayers(game);
+  const impostorIndex = Math.floor(Math.random() * connectedPlayers.length);
+  connectedPlayers.forEach((player, index) => {
     player.role = index === impostorIndex ? "IMPOSTOR" : "CIVIL";
   });
   game.civilWord = pair.civil;
@@ -123,17 +127,49 @@ const shufflePlayers = (game: GameState): void => {
   }
 };
 
+const transferHostToNextPlayer = (game: GameState, previousHostId: string): void => {
+  const sortedByJoin = [...game.players]
+    .filter((player) => player.id !== previousHostId)
+    .sort((playerA, playerB) => playerA.joinedAt - playerB.joinedAt);
+
+  const nextHost = sortedByJoin.find((player) => player.connected) ?? sortedByJoin[0];
+  if (!nextHost) return;
+
+  game.hostId = nextHost.id;
+  game.players.forEach((player) => {
+    player.isHost = player.id === nextHost.id;
+  });
+};
+
+const findFirstConnectedIndex = (game: GameState): number | null => {
+  for (let index = 0; index < game.players.length; index += 1) {
+    if (game.players[index].connected) return index;
+  }
+  return null;
+};
+
+const findNextConnectedIndex = (
+  game: GameState,
+  afterIndex: number,
+): number | null => {
+  for (let index = afterIndex + 1; index < game.players.length; index += 1) {
+    if (game.players[index].connected) return index;
+  }
+  return null;
+};
+
 const prepareNewMatch = (game: GameState): DomainEvent[] => {
   assignRolesAndWords(game);
   shufflePlayers(game);
   game.phase = "ROUNDS";
   game.currentRound = 1;
-  game.currentTurnIndex = 0;
+  const firstConnectedIndex = findFirstConnectedIndex(game);
+  game.currentTurnIndex = firstConnectedIndex ?? 0;
   game.votes = {};
   game.impostorGuess = undefined;
   game.winner = undefined;
 
-  const firstPlayer = game.players[0];
+  const firstPlayer = firstConnectedIndex !== null ? game.players[firstConnectedIndex] : null;
   const events: DomainEvent[] = [{ type: "ROUND_STARTED", round: 1 }];
   if (firstPlayer) {
     events.push({
@@ -305,7 +341,6 @@ export const markPlayerTurnDone = (
       events.push({ type: "VOTING_STARTED" });
     } else {
       game.currentRound += 1;
-      shufflePlayers(game);
       game.currentTurnIndex = 0;
       events.push({ type: "ROUND_STARTED", round: game.currentRound });
       const nextPlayer = game.players[game.currentTurnIndex];
@@ -457,13 +492,16 @@ export const leaveGame = (
     return logicResult(game);
   }
 
+  const leavingHostId = game.players[playerIndex].id === game.hostId ? game.hostId : null;
+
   if (disconnectOnly) {
     game.players[playerIndex].connected = false;
+    if (leavingHostId) {
+      transferHostToNextPlayer(game, leavingHostId);
+    }
     return logicResult(game);
   }
 
-  const totalPlayersBeforeLeave = game.players.length;
-  const leavingHost = game.players[playerIndex].id === game.hostId;
   game.players.splice(playerIndex, 1);
 
   // Remove votes involving this player.
@@ -478,21 +516,8 @@ export const leaveGame = (
     return null;
   }
 
-  if (leavingHost) {
-    const wasLargeGroup = totalPlayersBeforeLeave >= 3;
-    const sortedByJoin = [...game.players].sort(
-      (playerA, playerB) => playerA.joinedAt - playerB.joinedAt,
-    );
-    const nextHost = wasLargeGroup
-      ? sortedByJoin[0]
-      : game.players[0] ?? sortedByJoin[0];
-
-    if (nextHost) {
-      game.hostId = nextHost.id;
-      game.players.forEach((player) => {
-        player.isHost = player.id === nextHost.id;
-      });
-    }
+  if (leavingHostId) {
+    transferHostToNextPlayer(game, leavingHostId);
   }
 
   if (game.phase !== "LOBBY" && game.players.length < MIN_PLAYERS) {

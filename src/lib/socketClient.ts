@@ -16,7 +16,7 @@ export const getSocket = (): Socket<
     socket = io({
       autoConnect: false,
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 500,
       reconnectionDelayMax: 5000,
       transports: ["websocket", "polling"],
