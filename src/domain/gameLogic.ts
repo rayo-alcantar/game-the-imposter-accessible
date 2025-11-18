@@ -108,7 +108,13 @@ const resolveCategorySelection = (
 
 const assignRolesAndWords = (game: GameState): void => {
   const pair = getRandomWordPair(game.wordCategoryId);
+  game.players.forEach((player) => {
+    player.role = undefined;
+  });
   const connectedPlayers = getConnectedPlayers(game);
+  if (!connectedPlayers.length) {
+    throw new GameError("No hay jugadores conectados para asignar roles.");
+  }
   const impostorIndex = Math.floor(Math.random() * connectedPlayers.length);
   connectedPlayers.forEach((player, index) => {
     player.role = index === impostorIndex ? "IMPOSTOR" : "CIVIL";
@@ -156,6 +162,13 @@ const findNextConnectedIndex = (
     if (game.players[index].connected) return index;
   }
   return null;
+};
+
+const findConnectedFromIndex = (game: GameState, startIndex: number): number | null => {
+  for (let index = startIndex; index < game.players.length; index += 1) {
+    if (game.players[index].connected) return index;
+  }
+  return findFirstConnectedIndex(game);
 };
 
 const prepareNewMatch = (game: GameState): DomainEvent[] => {
@@ -307,10 +320,14 @@ export const startGame = (gameId: string, requesterId: string): GameLogicResult 
     throw new GameError("Solo la persona anfitriona puede iniciar la partida.");
   }
   if (game.phase !== "LOBBY") {
-    throw new GameError("La partida ya comenzó.");
+    throw new GameError("La partida ya comenzo.");
   }
   if (game.players.length !== game.maxPlayers) {
-    throw new GameError("Aún faltan jugadores para comenzar.");
+    throw new GameError("Aun faltan jugadores para comenzar.");
+  }
+  const connectedPlayers = getConnectedPlayers(game);
+  if (connectedPlayers.length < MIN_PLAYERS) {
+    throw new GameError("Se necesitan al menos 3 jugadores conectados para iniciar.");
   }
 
   game.phase = "ASSIGNING";
@@ -326,13 +343,28 @@ export const markPlayerTurnDone = (
   if (game.phase !== "ROUNDS") {
     throw new GameError("No estamos en la fase de rondas.");
   }
-  const currentPlayer = game.players[game.currentTurnIndex];
-  if (!currentPlayer || currentPlayer.id !== playerId) {
+  const connectedPlayers = getConnectedPlayers(game);
+  if (connectedPlayers.length < MIN_PLAYERS) {
+    game.phase = "FINISHED";
+    game.winner = undefined;
+    return logicResult(game);
+  }
+
+  const currentIndex = findConnectedFromIndex(game, game.currentTurnIndex);
+  if (currentIndex === null) {
+    game.phase = "FINISHED";
+    game.winner = undefined;
+    return logicResult(game);
+  }
+  game.currentTurnIndex = currentIndex;
+  const currentPlayer = game.players[currentIndex];
+  if (!currentPlayer || !currentPlayer.connected || currentPlayer.id !== playerId) {
     throw new GameError("No es tu turno en este momento.");
   }
 
   const events: DomainEvent[] = [];
-  const isLastPlayer = game.currentTurnIndex + 1 >= game.players.length;
+  const nextConnectedIndex = findNextConnectedIndex(game, currentIndex);
+  const isLastPlayer = nextConnectedIndex === null;
 
   if (isLastPlayer) {
     if (game.currentRound >= TOTAL_ROUNDS) {
@@ -341,9 +373,10 @@ export const markPlayerTurnDone = (
       events.push({ type: "VOTING_STARTED" });
     } else {
       game.currentRound += 1;
-      game.currentTurnIndex = 0;
+      const nextFirstIndex = findFirstConnectedIndex(game);
+      game.currentTurnIndex = nextFirstIndex ?? 0;
       events.push({ type: "ROUND_STARTED", round: game.currentRound });
-      const nextPlayer = game.players[game.currentTurnIndex];
+      const nextPlayer = nextFirstIndex !== null ? game.players[nextFirstIndex] : null;
       if (nextPlayer) {
         events.push({
           type: "TURN_STARTED",
@@ -354,8 +387,8 @@ export const markPlayerTurnDone = (
       }
     }
   } else {
-    game.currentTurnIndex += 1;
-    const nextPlayer = game.players[game.currentTurnIndex];
+    game.currentTurnIndex = nextConnectedIndex;
+    const nextPlayer = nextConnectedIndex !== null ? game.players[nextConnectedIndex] : null;
     if (nextPlayer) {
       events.push({
         type: "TURN_STARTED",
@@ -444,8 +477,9 @@ export const restartGame = (
   if (game.phase !== "RESULTS") {
     throw new GameError("Primero deben terminar la partida actual.");
   }
-  if (game.players.length < MIN_PLAYERS) {
-    throw new GameError("Se necesitan al menos 3 jugadores para reiniciar.");
+  const connectedPlayers = getConnectedPlayers(game);
+  if (connectedPlayers.length < MIN_PLAYERS) {
+    throw new GameError("Se necesitan al menos 3 jugadores conectados para reiniciar.");
   }
 
   const categorySelection = resolveCategorySelection(
@@ -469,7 +503,8 @@ export const reshuffleRolesAndWords = (
   if (game.phase === "LOBBY") {
     throw new GameError("Necesitas iniciar la partida primero.");
   }
-  if (game.players.length < MIN_PLAYERS) {
+  const connectedPlayers = getConnectedPlayers(game);
+  if (connectedPlayers.length < MIN_PLAYERS) {
     throw new GameError("Se necesitan al menos 3 jugadores conectados.");
   }
 
@@ -495,14 +530,21 @@ export const leaveGame = (
   const leavingHostId = game.players[playerIndex].id === game.hostId ? game.hostId : null;
 
   if (disconnectOnly) {
-    game.players[playerIndex].connected = false;
-    if (leavingHostId) {
-      transferHostToNextPlayer(game, leavingHostId);
+    const canRemoveCompletely = game.players.length - 1 >= MIN_PLAYERS;
+    if (canRemoveCompletely) {
+      game.players.splice(playerIndex, 1);
+      if (playerIndex <= game.currentTurnIndex && game.currentTurnIndex > 0) {
+        game.currentTurnIndex -= 1;
+      }
+    } else {
+      game.players[playerIndex].connected = false;
     }
-    return logicResult(game);
+  } else {
+    game.players.splice(playerIndex, 1);
+    if (playerIndex <= game.currentTurnIndex && game.currentTurnIndex > 0) {
+      game.currentTurnIndex -= 1;
+    }
   }
-
-  game.players.splice(playerIndex, 1);
 
   // Remove votes involving this player.
   Object.keys(game.votes).forEach((key) => {
@@ -520,13 +562,19 @@ export const leaveGame = (
     transferHostToNextPlayer(game, leavingHostId);
   }
 
-  if (game.phase !== "LOBBY" && game.players.length < MIN_PLAYERS) {
+  const connectedCount = getConnectedPlayers(game).length;
+  if (game.phase !== "LOBBY" && connectedCount < MIN_PLAYERS) {
     game.phase = "FINISHED";
     game.winner = undefined;
   }
 
   if (game.currentTurnIndex >= game.players.length) {
     game.currentTurnIndex = 0;
+  }
+
+  const alignedTurnIndex = findConnectedFromIndex(game, game.currentTurnIndex);
+  if (alignedTurnIndex !== null) {
+    game.currentTurnIndex = alignedTurnIndex;
   }
 
   return logicResult(game);
